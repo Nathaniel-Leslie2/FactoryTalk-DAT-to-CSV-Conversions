@@ -5,7 +5,7 @@
 
 Private Sub Display_AnimationStart() ' Default Factory Talk subroutine creation
 End Sub
-Sub AutomatedCSVConversion_Change() ' Monitors station data log [JST]DATALOG.ON_OUTPUT.0 value change
+Sub AutomatedCSVConversion_Change() 
     Dim MyTagGroup As TagGroup
     If MyTagGroup Is Nothing Then
         Set MyTagGroup = Application.CreateTagGroup(Me.AreaName)
