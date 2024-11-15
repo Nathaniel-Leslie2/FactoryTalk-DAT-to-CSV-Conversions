@@ -1,0 +1,291 @@
+' Author: Nathaniel Leslie-Rivas
+' Last Update: 11/12/2024
+' Notes: Code refactor and optimization
+' Purpse: Automate data log conversions to csv files in separate folder location in data log directory
+
+Private Sub Display_AnimationStart() ' Default Factory Talk subroutine creation
+End Sub
+Sub AutomatedCSVConversion_Change() ' Monitors station data log [JST]DATALOG.ON_OUTPUT.0 value change
+    Dim MyTagGroup As TagGroup
+    If MyTagGroup Is Nothing Then
+        Set MyTagGroup = Application.CreateTagGroup(Me.AreaName)
+        MyTagGroup.Add "<ENTER THE TAG YOU WANT TO MONITOR>"
+        Dim Tag1 As Tag
+        Set Tag1 = MyTagGroup.Item("<ENTER THE TAG YOU WANT TO MONITOR>")
+    End If
+    
+    If Tag1.Value Then
+        ListFilesInFolder ' Calls to subroutine to sart conversion
+    End If
+End Sub
+Sub ListFilesInFolder()
+    Dim fso As Object
+    Dim folderPath As String
+    Dim logFile As String
+    Dim folderPathDestination As String
+    Dim fileList As Collection
+    Dim filePathList() As String
+    Dim fileName As Variant
+    Dim newPathToConvert As String
+    Dim isDATFileAccessible As Boolean
+    Dim matchFound As Boolean
+    Dim j As Long
+    Dim i As Long
+
+    ' Initialize values
+    folderPath = "<ENTER YOUR DIRECTORY HERE>\Data Logs" ' source dat file path
+    logFile = "<ENTER YOUR DIRECTORY HERE>\Data Logs\conversions.log" ' log file path
+    folderPathDestination = "<ENTER YOUR DIRECTORY HERE>\Data Logs\CSV" ' Destination folder path
+    Set fso = CreateObject("Scripting.FileSystemObject")
+    Set fileList = New Collection
+
+    ' Retrieve file list from the folder
+    TraverseDataLogFolder fso.GetFolder(folderPath), fileList, filePathList, i
+    
+    ' Process each file in the list
+    For j = 1 To fileList.Count
+        ' Check if .DAT file is accessible (checks if the PLC is currently writing to the file)
+        isDATFileAccessible = IsFileAccessible(filePathList(j - 1)) ' Adjust for 1-based index of Collection
+        
+        ' Check if the file has been converted using the log
+        matchFound = CheckIfLineMatchesString(logFile, fileList(j))
+
+        ' If file is accessible and no match is found, convert to CSV
+        If isDATFileAccessible And Not matchFound Then
+            newPathToConvert = Replace(filePathList(j - 1), folderPath, folderPathDestination)
+            MakeCSVFolderDirectory newPathToConvert
+            ConvertToCSV filePathList(j - 1)
+        End If
+    Next j
+
+    ' Log completion message
+    fso.GetFile(logFile).Attributes = 2 ' Hides file from user to decrease likelyhood of accidental deletion
+    folderPath = "<ENTER YOUR DIRECTORY HERE>\Data Logs\CSV"
+    RemoveOldCSVFiles fso.GetFolder(folderPath), fileList, filePathList, i ' If DAT file no longer exists, delete csv equivalent
+    LogDiagnosticsMessage "Automatic data log to CSV conversions finished."
+End Sub
+Sub TraverseDataLogFolder(folder As Object, fileList As Collection, filePathList As Variant, i As Long)
+    On Error Resume Next
+    Dim subfolder As Object
+    Dim file As Object
+    Dim lastFour As String
+    
+    ' Traverse subfolders and ignore any folder names containing "CSV"
+    For Each subfolder In folder.Subfolders
+        If InStr(subfolder.Name, "CSV") = 0 Then
+            ' Recursively traverse the subfolders in \Data Log
+            TraverseDataLogFolder subfolder, fileList, filePathList, i
+        End If
+    Next subfolder
+
+    ' Process files in the current folder
+    For Each file In folder.Files
+        ' Check if the file is a .DAT file
+        lastFour = Right(file.Name, 4)
+        If lastFour = ".DAT" Then
+            ' Add the file name to the fileList collection
+            fileList.Add file.Name
+            ' Store the file path in the filePathList array while preserving the existing values
+            ReDim Preserve filePathList(i)
+            filePathList(i) = file.path
+            i = i + 1
+        End If
+    Next file
+End Sub
+Function IsFileAccessible(filePath As String) As Boolean
+    Dim fso As Object
+    Dim file As Object
+    
+    ' Initialize the FileSystemObject
+    Set fso = CreateObject("Scripting.FileSystemObject")
+    
+    ' Check if the file exists
+    If Not fso.FileExists(filePath) Then
+        IsFileAccessible = False
+        Exit Function
+    End If
+    
+    ' Attempt to open the file for reading
+    On Error Resume Next
+    Set file = fso.OpenTextFile(filePath, 8) ' 1 = ForReading
+    
+    If Err.Number <> 0 Then
+        ' If an error occurs, the file is not accessible
+        IsFileAccessible = False
+    Else
+        ' If no error, file is accessible
+        IsFileAccessible = True
+        file.Close
+    End If
+    
+    ' Reset error handling
+    On Error GoTo 0
+End Function
+Function CheckIfLineMatchesString(filePath As String, searchString As String) As Boolean
+    Dim fileNumber As Integer
+    Dim line As String
+    Dim matchFound As Boolean
+    matchFound = False ' Initialize the result to False
+    
+    ' Get the next available file number
+    fileNumber = FreeFile
+    
+    ' Open the file for input (read mode)
+    On Error GoTo FileReadError
+    Open filePath For Input As #fileNumber
+    On Error GoTo 0 ' Reset error handling after file is opened
+    
+    ' Read the file line by line
+    Do Until EOF(fileNumber)
+        Line Input #fileNumber, line
+        ' Check if the line contains the search string
+        If InStr(line, searchString) > 0 Then
+            matchFound = True
+            Exit Do ' Exit the loop once a match is found
+        End If
+    Loop
+    
+    ' Close the file
+    Close #fileNumber
+
+    ' Return the result (True if a match was found, False otherwise)
+    CheckIfLineMatchesString = matchFound
+    Exit Function
+    
+FileReadError:
+    ' Handle file read error, creates file if it does not exist
+    Close #fileNumber
+    CheckIfLineMatchesString = False
+    If Err.Number = 53 Then ' File not found (Error 53)
+        Open filePath For Output As #fileNumber
+        Print #fileNumber, "!!!!DO NOT DELETE ME!!!!"
+        Close #fileNumber
+    End If
+    Err.Clear
+End Function
+Sub MakeCSVFolderDirectory(newPathToConvert As String)
+    Dim destinationFolderPath As String
+    Dim parentFolderPath As String
+
+    ' Define the base destination folder
+    destinationFolderPath = "<ENTER YOUR DIRECTORY HERE>\Data Logs\CSV"
+    
+    ' Get the parent folder path of the destination path
+    parentFolderPath = GetParentFolder(newPathToConvert)
+    
+    ' Ensure the CSV directory exists
+    If Dir(destinationFolderPath, vbDirectory) = "" Then
+        MkDir destinationFolderPath
+    End If
+    
+    ' Create the parent folder if it doesn't exist
+    If Dir(parentFolderPath, vbDirectory) = "" Then
+        MkDir parentFolderPath
+    End If
+End Sub
+Function GetParentFolder(path As String) As String
+    Dim lastSlashPos As Long
+    lastSlashPos = InStrRev(path, "\")
+    If lastSlashPos > 0 Then
+        GetParentFolder = Left(path, lastSlashPos - 1)
+    Else
+        GetParentFolder = path
+    End If
+End Function
+Sub ConvertToCSV(pathToConvert As String)
+    Dim pathToFileViewer As String
+    Dim pathToDATFile As String
+    Dim pathToCSVFile As String
+    Dim pathToCSVFolder As String
+    Dim TableIndicator As Integer
+
+    pathToFileViewer = """<ENTER YOUR DIRECTORY HERE>\FTViewFileViewer.exe"""
+    TableIndicator = 0
+
+    pathToDATFile = pathToConvert
+    pathToCSVFolder = Replace(pathToConvert, "\Data Logs", "\Data Logs\CSV")
+    pathToCSVFile = Replace(pathToCSVFolder, ".DAT", ".csv")
+    If Dir("<ENTER YOUR DIRECTORY HERE>\Data Logs\CSV", vbDirectory) = "" Then
+        MkDir "<ENTER YOUR DIRECTORY HERE>\Data Logs\CSV"
+    End If
+        
+        ' use table conversion unless its a String or Tagname DAT file
+    TableIndicator = InStr(pathToCSVFile, "String") + InStr(pathToCSVFile, "Tagname")
+    If (TableIndicator = 0) Then
+        pathToCSVFile = Replace(pathToCSVFile, ".csv", "_table.csv")
+        pathToCSVFile = pathToCSVFile & ""
+        appParams = "AppStart " & pathToFileViewer & " /sd " & """" & pathToDATFile & """" & " """ & pathToCSVFile & """" & " /Table"
+    Else
+        pathToCSVFile = pathToCSVFile & ""
+        appParams = "AppStart " & pathToFileViewer & " /sd " & """" & pathToDATFile & """" & " """ & pathToCSVFile & """"
+    End If
+        
+    ' appstart command line string
+    Application.ExecuteCommand appParams
+    AppendToLogFile pathToDATFile
+End Sub
+Sub AppendToLogFile(logMessage As String)
+    Dim logFilePath As String
+    Dim fileNumber As Integer
+    Dim logFileExists As Boolean
+
+    ' Set the path to the log file
+    logFilePath = "<ENTER YOUR DIRECTORY HERE>\Data Logs\conversions.log"
+    
+    ' Check if the log file exists
+    logFileExists = Dir(logFilePath) <> ""
+    
+    ' Get the next available file number
+    fileNumber = FreeFile
+    
+    ' Open the log file for appending
+    On Error GoTo CreateOrAppendError
+    Open logFilePath For Append As #fileNumber
+    On Error GoTo 0 ' Reset error handling after file is opened
+
+    ' Append the log message to the file
+    Print #fileNumber, logMessage
+    
+    ' Close the file
+    Close #fileNumber
+    Exit Sub
+    
+CreateOrAppendError:
+    ' If the log file doesn't exist, create it
+    If Err.Number = 53 Then ' File not found (Error 53)
+        ' Create and open the log file for writing (create new file if not exists)
+        Open logFilePath For Output As #fileNumber
+        Print #fileNumber, "!!!!DO NOT DELETE ME!!!!"
+        Close #fileNumber
+    Else
+        MsgBox "AppendToLogFile Error - An unexpected error occurred: " & Err.Description
+    End If
+    
+    ' Reset error handling
+    Err.Clear
+End Sub
+Sub RemoveOldCSVFiles(folder As Object, fileList As Collection, filePathList As Variant, i As Long)
+    On Error Resume Next
+    Dim subfolder As Object
+    Dim file As Object
+    Dim DATFilePath As String
+
+    ' Traverse subfolders in csv directory
+    For Each subfolder In folder.Subfolders
+            RemoveOldCSVFiles subfolder, fileList, filePathList, i ' Recursively calls subroutine
+    Next subfolder
+
+    ' Process files in the current folder. If no match, delete CSV file
+    For Each file In folder.Files
+        DATFilePath = Replace(file.path, "\CSV", "")
+        DATFilePath = Replace(DATFilePath, ".csv", ".DAT")
+
+        If InStr(DATFilePath, "_table") Then
+            DATFilePath = Replace(DATFilePath, "_table", "")
+        End If
+        ' Check if the DAT file does not exist
+        If Len(Dir(DATFilePath)) <= 0 Then
+            Kill file.path ' Deletes CSV file if dat file no longer exists
+        End If
+    Next file
+End Sub
